@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { VideoInput, FormAnalysis, Exercise } from '../types/fitness';
-import { Video, AlertTriangle, CheckCircle, XCircle, Camera } from 'lucide-react';
-import { formAnalyzer } from '../services/formAnalyzer';
+import { Video, AlertTriangle, CheckCircle, XCircle, Camera, Upload, Loader } from 'lucide-react';
+import { realFormAnalyzer } from '../services/realFormAnalyzer';
 
 interface VideoAnalysisProps {
   exercises: Exercise[];
@@ -16,9 +16,36 @@ export function VideoAnalysis({ exercises, onAnalysisComplete }: VideoAnalysisPr
   const [analysis, setAnalysis] = useState<FormAnalysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number>(0);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleAnalyze = () => {
+  const handleVideoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('video/')) {
+      setError('Please upload a valid video file.');
+      return;
+    }
+
+    if (file.size > 100 * 1024 * 1024) {
+      setError('Video file size must be less than 100MB.');
+      return;
+    }
+
+    setVideoFile(file);
+    const url = URL.createObjectURL(file);
+    setVideoUrl(url);
     setError(null);
+    setAnalysis(null);
+  };
+
+  const handleAnalyze = async () => {
+    setError(null);
+    setProgress(0);
 
     if (!videoInput.consent_confirmed) {
       setError('You must confirm consent to video analysis before proceeding.');
@@ -30,29 +57,40 @@ export function VideoAnalysis({ exercises, onAnalysisComplete }: VideoAnalysisPr
       return;
     }
 
+    if (!videoFile || !videoRef.current) {
+      setError('Please upload a video file first.');
+      return;
+    }
+
     setAnalyzing(true);
 
-    setTimeout(() => {
-      try {
-        const exercise = exercises.find((e) => e.id === videoInput.exercise_id);
-        const result = formAnalyzer.analyzeForm(
-          {
-            video_id: crypto.randomUUID(),
-            ...videoInput,
-          } as VideoInput,
-          exercise
-        );
-
-        setAnalysis(result);
-        if (onAnalysisComplete) {
-          onAnalysisComplete(result);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Analysis failed');
-      } finally {
-        setAnalyzing(false);
+    try {
+      const exercise = exercises.find((e) => e.id === videoInput.exercise_id);
+      if (!exercise) {
+        throw new Error('Exercise not found');
       }
-    }, 1500);
+
+      const result = await realFormAnalyzer.analyzeVideoWithPoses(
+        videoRef.current,
+        {
+          video_id: crypto.randomUUID(),
+          ...videoInput,
+        } as VideoInput,
+        exercise,
+        (progress) => setProgress(progress)
+      );
+
+      setAnalysis(result);
+      if (onAnalysisComplete) {
+        onAnalysisComplete(result);
+      }
+    } catch (err) {
+      console.error('Analysis error:', err);
+      setError(err instanceof Error ? err.message : 'Analysis failed');
+    } finally {
+      setAnalyzing(false);
+      setProgress(0);
+    }
   };
 
   return (
@@ -64,6 +102,42 @@ export function VideoAnalysis({ exercises, onAnalysisComplete }: VideoAnalysisPr
         </div>
 
         <div className="space-y-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Upload Video</label>
+            <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 hover:border-blue-500 transition-colors">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="video/*"
+                onChange={handleVideoUpload}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full flex flex-col items-center gap-2 text-gray-600 hover:text-blue-600 transition-colors"
+              >
+                <Upload className="w-8 h-8" />
+                <span className="text-sm font-medium">
+                  {videoFile ? videoFile.name : 'Click to upload workout video'}
+                </span>
+                <span className="text-xs text-gray-500">MP4, MOV, AVI (max 100MB)</span>
+              </button>
+            </div>
+          </div>
+
+          {videoUrl && (
+            <div className="border border-gray-300 rounded-lg overflow-hidden">
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                controls
+                className="w-full"
+                preload="metadata"
+              />
+            </div>
+          )}
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Select Exercise</label>
             <select
@@ -132,11 +206,27 @@ export function VideoAnalysis({ exercises, onAnalysisComplete }: VideoAnalysisPr
 
           <button
             onClick={handleAnalyze}
-            disabled={analyzing || !videoInput.consent_confirmed || !videoInput.exercise_id}
-            className="w-full bg-blue-600 text-white py-3 px-6 rounded-md font-semibold hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+            disabled={analyzing || !videoInput.consent_confirmed || !videoInput.exercise_id || !videoFile}
+            className="w-full bg-blue-600 text-white py-3 px-6 rounded-md font-semibold hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            {analyzing ? 'Analyzing Form...' : 'Analyze Form'}
+            {analyzing ? (
+              <>
+                <Loader className="w-5 h-5 animate-spin" />
+                <span>Analyzing Form... {Math.round(progress)}%</span>
+              </>
+            ) : (
+              'Analyze Form'
+            )}
           </button>
+
+          {analyzing && progress > 0 && (
+            <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+              <div
+                className="bg-blue-600 h-full transition-all duration-300"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
 
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
